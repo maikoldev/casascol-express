@@ -1,0 +1,19 @@
+{
+  "name": "casascol-express",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "dotenvx run -- node src/app.js",
+    "dev": "dotenvx run -- nodemon src/app.js"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.5"
+  },
+  "dependencies": {
+    "@dotenvx/dotenvx": "^1.24.5",
+    "cors": "^2.8.5",
+    "express": "~4.16.4",
+    "node-fetch": "^3.3.2"
+  }
+}
