@@ -3,6 +3,7 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import pLimit from "p-limit";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,29 +27,27 @@ const fetchAllProperties = async (params) => {
     cantidad: params?.cantidad || 100,
   };
 
-  const apiUrl = `http://simi-api.com/ApiSimiweb/response/v2.1.1/filtroInmueble/limite/${newParams.limite}/total/${newParams.cantidad}`;
-  const response = await fetch(apiUrl, fetchOptions);
-  const data = await response.json();
+  const allProperties = [];
+  let hasMorePages = true;
 
-  // console.log("res", response);
-  // console.log("data", data);
+  while (hasMorePages) {
+    const apiUrl = `http://simi-api.com/ApiSimiweb/response/v2.1.1/filtroInmueble/limite/${newParams.limite}/total/${newParams.cantidad}`;
+    const response = await fetch(apiUrl, fetchOptions);
+    const data = await response.json();
 
-  const properties = data.Inmuebles;
-  const datosGrales = data.datosGrales;
+    const properties = data.Inmuebles;
+    const datosGrales = data.datosGrales;
 
-  console.log("datosGrales", datosGrales);
+    allProperties.push(...properties);
 
-  if (parseInt(datosGrales.pagina_actual) < parseInt(datosGrales.fin)) {
-    // console.log("entre");
-    newParams.limite += 1;
-    const nextProperties = await fetchAllProperties(newParams);
-
-    if (nextProperties.length > 0) {
-      properties.push(...nextProperties);
+    if (parseInt(datosGrales.pagina_actual) < parseInt(datosGrales.fin)) {
+      newParams.limite += 1;
+    } else {
+      hasMorePages = false;
     }
   }
 
-  return properties;
+  return allProperties;
 };
 
 const getPropertiesCodes = async (properties) => {
@@ -59,19 +58,34 @@ const getPropertiesCodes = async (properties) => {
   return propertiesCodes;
 };
 
-const fetchSingleProperty = async (propertyCode) => {
-  try {
-    console.log("Fetching property with code:", propertyCode);
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const fetchSingleProperty = async (propertyCode, retries = 3, delayMs = 1000) => {
+  const startTime = Date.now();
+  console.log(`[${startTime}] Start fetching property with code: ${propertyCode}`);
+
+  try {
     const apiUrl = `http://simi-api.com/ApiSimiweb/response/v2/inmueble/codInmueble/${propertyCode}`;
     const response = await fetch(apiUrl, fetchOptions);
 
-    console.log("response", response);
-    // const data = await response.json();
+    if (!response.ok) {
+      throw new Error(`HTTP Error: ${response.status}`);
+    }
 
-    // return data;
+    const data = await response.json();
+
+    const endTime = Date.now();
+    console.log(`[${endTime}] Finished fetching property with code: ${propertyCode}`);
+
+    return data;
   } catch (error) {
-    console.error(`Error fetching property ${propertyCode}:`, error.message);
+    if (retries > 0) {
+      console.error(`Error fetching property with code: ${propertyCode}. Retrying in ${delayMs}ms...`);
+      await delay(delayMs);
+      return fetchSingleProperty(propertyCode, retries - 1);
+    }
+
+    console.error(`Failed to fetch ${propertyCode} after retries`);
     return null;
   }
 };
@@ -93,15 +107,18 @@ mainRouter.post("/import/main", async (req, res) => {
     cantidad: parseInt(itemsPerPage),
   };
 
-  const allProperties = await fetchAllProperties(newParams);
-  const propertiesCodes = await getPropertiesCodes(allProperties);
+  try {
+    const allProperties = await fetchAllProperties(newParams);
+    const propertiesCodes = await getPropertiesCodes(allProperties);
 
-  res.json({
-    // data: allProperties,
-    // single: singleProperties || [],
-    codes: propertiesCodes,
-    count: allProperties.length,
-  });
+    res.json({
+      codes: propertiesCodes,
+      count: allProperties.length,
+    });
+  } catch (error) {
+    console.error("Error fetching properties:", error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 mainRouter.get("/import/secondary", async (req, res) => {
@@ -112,21 +129,29 @@ mainRouter.get("/import/secondary", async (req, res) => {
   const codes = fs.readFileSync(filePath, "utf8");
   const codesArray = codes.split("\n");
 
-  // console.log("codesArray", codesArray);
-  // return;
+  // Set the concurrency limit
+  const concurrencyLimit = 5;
+  const limiter = pLimit(concurrencyLimit);
 
-  const singlePropertiesPromises = codesArray.map((code) => fetchSingleProperty(code));
-  // console.log("singlePropertiesPromises", singlePropertiesPromises);
-  return "x";
+  const singlePropertiesPromises = codesArray.map((code) =>
+    // prettier-ignore
+    limiter(() => fetchSingleProperty(code))
+  );
 
-  // const singleProperties = await Promise.all(singlePropertiesPromises);
+  try {
+    const singleProperties = await Promise.all(singlePropertiesPromises);
+    const countProperties = singleProperties.filter((prop) => prop !== null).length;
 
-  // console.log("allProperties", allProperties);
+    console.log("All properties fetched");
 
-  res.json({
-    singles: singleProperties,
-    count: singleProperties.length,
-  });
+    res.json({
+      singles: singleProperties,
+      count: countProperties,
+    });
+  } catch (error) {
+    console.error("Error fetching properties:", error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default mainRouter;
